@@ -2,7 +2,6 @@ package amf
 
 import (
 	"encoding/binary"
-	"fmt"
 	"math"
 )
 
@@ -16,7 +15,7 @@ func NewDecoder(data []byte) Decoder {
 }
 
 func (c *Decoder) SkipNull() {
-	if c.ptr < len(c.data) && c.data[c.ptr] == MarkerNull {
+	if c.ptr < len(c.data) && c.data[c.ptr] == markerNull {
 		c.ptr += 1
 	}
 }
@@ -27,7 +26,7 @@ func (c *Decoder) GetString() (string, error) {
 	}
 
 	marker := c.data[c.ptr]
-	if marker != MarkerStr && marker != MarkerStrLong {
+	if marker != markerStr && marker != markerStrLong {
 		return "", ErrIncorrectMarker
 	}
 
@@ -35,7 +34,7 @@ func (c *Decoder) GetString() (string, error) {
 
 	var strLen int
 
-	if marker == MarkerStrLong {
+	if marker == markerStrLong {
 		strLen = int(binary.BigEndian.Uint32(c.data[ptr : ptr+sizeStrLongAddr]))
 		ptr += sizeStrLongAddr
 	} else {
@@ -57,7 +56,7 @@ func (c *Decoder) GetFloat64() (float64, error) {
 	if c.ptr+sizeNum >= len(c.data) {
 		return 0, ErrBufferEmpty
 	}
-	if c.data[c.ptr] != MarkerNum {
+	if c.data[c.ptr] != markerNum {
 		return 0, ErrIncorrectMarker
 	}
 
@@ -72,7 +71,7 @@ func (c *Decoder) GetBool() (bool, error) {
 	if c.ptr+sizeBool >= len(c.data) {
 		return false, ErrBufferEmpty
 	}
-	if c.data[c.ptr] != MarkerBool {
+	if c.data[c.ptr] != markerBool {
 		return false, ErrIncorrectMarker
 	}
 	c.ptr += sizeMarker + sizeBool
@@ -87,7 +86,6 @@ func (c *Decoder) GetObjectKey() (string, error) {
 	keyLen := int(binary.BigEndian.Uint16(c.data[c.ptr:]))
 
 	if c.ptr+sizeObjKeyAddr+keyLen > len(c.data) {
-		fmt.Printf("%d\n", keyLen)
 		return "", ErrBufferEmpty
 	}
 
@@ -104,12 +102,12 @@ func (c *Decoder) GetObject() (Object, error) {
 	}
 
 	marker := c.data[c.ptr]
-	if marker != MarkerECMAArray && marker != MarkerObj {
+	if marker != markerECMAArray && marker != markerObj {
 		return nil, ErrIncorrectMarker
 	}
 	c.ptr += 1
 
-	if marker == MarkerECMAArray {
+	if marker == markerECMAArray {
 		c.ptr += 4 // skip length, rely on end marker
 	}
 
@@ -122,7 +120,7 @@ func (c *Decoder) GetObject() (Object, error) {
 		}
 
 		if key == "" {
-			if c.ptr < len(c.data) && c.data[c.ptr] == MarkerObjEnd {
+			if c.ptr < len(c.data) && c.data[c.ptr] == markerObjEnd {
 				break
 			}
 			return nil, ErrIncorrectMarker
@@ -145,13 +143,13 @@ func (c *Decoder) GetCurrent() (any, error) {
 	}
 
 	switch c.data[c.ptr] {
-	case MarkerNum:
+	case markerNum:
 		return c.GetFloat64()
-	case MarkerStr, MarkerStrLong:
+	case markerStr, markerStrLong:
 		return c.GetString()
-	case MarkerBool:
+	case markerBool:
 		return c.GetBool()
-	case MarkerObj:
+	case markerObj:
 		return c.GetObject()
 	default:
 		return nil, ErrInvalidMarker

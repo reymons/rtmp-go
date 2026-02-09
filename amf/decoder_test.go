@@ -4,21 +4,13 @@ import (
 	"testing"
 )
 
-func newCodec(size int) (Encoder, Decoder, []byte) {
-	data := make([]byte, size)
-	enc := NewEncoder(data)
-	dec := NewDecoder(data)
-	return enc, dec, data
-}
-
 func TestDecoder_GetString(t *testing.T) {
-	enc, dec, _ := newCodec(20)
 	str := "hello world"
 
-	if err := enc.PutString(str); err != nil {
-		t.Fatal(err)
-	}
+	enc := NewEncoder()
+	enc.PutString(str)
 
+	dec := NewDecoder(enc.Data())
 	thisStr, err := dec.GetString()
 	if err != nil {
 		t.Fatal(err)
@@ -30,13 +22,12 @@ func TestDecoder_GetString(t *testing.T) {
 }
 
 func TestDecoder_GetFloat64(t *testing.T) {
-	enc, dec, _ := newCodec(20)
 	num := 12030213.1231231
 
-	if err := enc.PutFloat64(num); err != nil {
-		t.Fatal(err)
-	}
+	enc := NewEncoder()
+	enc.PutFloat64(num)
 
+	dec := NewDecoder(enc.Data())
 	thisNum, err := dec.GetFloat64()
 	if err != nil {
 		t.Fatal(err)
@@ -48,14 +39,14 @@ func TestDecoder_GetFloat64(t *testing.T) {
 }
 
 func TestDecoder_GetObject(t *testing.T) {
-	enc, dec, _ := newCodec(100)
-
 	obj := NewObject()
 	obj.AddProp("name", "Danil")
 	obj.AddProp("age", 25)
 
+	enc := NewEncoder()
 	enc.PutObject(obj)
 
+	dec := NewDecoder(enc.Data())
 	obj, err := dec.GetObject()
 	if err != nil {
 		t.Fatal(err)
