@@ -48,6 +48,12 @@ func handshakeServer(conn *Conn) error {
 		return fmt.Errorf("send server version and signature: %w", err)
 	}
 
+	// Echo client signature
+	Debugf("Handshake: echoing client signature\n")
+	if _, err := conn.org.Write(buf1[1:]); err != nil {
+		return fmt.Errorf("echo client signature: %w", err)
+	}
+
 	srvSig := make([]byte, sigSize)
 
 	// Read echoed server signature
@@ -58,12 +64,6 @@ func handshakeServer(conn *Conn) error {
 
 	if !bytes.Equal(srvSig, buf2[1:]) {
 		return errSignatureMismatch
-	}
-
-	// Echo client signature
-	Debugf("Handshake: echoing client signature\n")
-	if _, err := conn.org.Write(buf1[1:]); err != nil {
-		return fmt.Errorf("echo client signature: %w", err)
 	}
 
 	return nil
