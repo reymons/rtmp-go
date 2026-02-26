@@ -101,12 +101,17 @@ func runClient() {
 	}
 	trx += 1
 
+	if err := conn.SetChunkSize(4); err != nil {
+		panic(err)
+	}
+
 	go func() {
+		var timestamp uint32
 		for {
 			pack := rtmp.Packet{
 				Type:      rtmp.PackVideo,
 				Channel:   2,
-				Timestamp: 40,
+				Timestamp: timestamp,
 				Data:      []byte("Hello world"),
 				Stream:    1,
 			}
@@ -114,16 +119,18 @@ func runClient() {
 				fmt.Printf("send client video packet error: %v\n", err)
 				return
 			}
-			time.Sleep(time.Millisecond * 150)
+			time.Sleep(time.Millisecond * 16)
+			timestamp += 16
 		}
 	}()
 
 	go func() {
+		var timestamp uint32
 		for {
 			pack := rtmp.Packet{
 				Type:      rtmp.PackAudio,
 				Channel:   2,
-				Timestamp: 17,
+				Timestamp: timestamp,
 				Data:      []byte("Hello world"),
 				Stream:    1,
 			}
@@ -131,7 +138,8 @@ func runClient() {
 				fmt.Printf("send client audio packet error: %v\n", err)
 				return
 			}
-			time.Sleep(time.Millisecond * 50)
+			time.Sleep(time.Millisecond * 21)
+			timestamp += 21
 		}
 	}()
 

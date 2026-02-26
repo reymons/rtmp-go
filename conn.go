@@ -54,6 +54,7 @@ type Conn struct {
 	recvChunkSize  uint32
 	sendChunkSize  uint32
 	channels       map[uint32]*Channel
+	sendChannels   map[uint32]*SendChannel
 	sendBuf        []byte
 	mesgBuf        []uintptr // use uintptr for alignment
 	sendWinSize    uint32
@@ -110,6 +111,7 @@ func newConn(org net.Conn) *Conn {
 		org:               org,
 		recvChunkSize:     defaultChunkSize,
 		channels:          make(map[uint32]*Channel),
+		sendChannels:      make(map[uint32]*SendChannel),
 		mesgBuf:           make([]uintptr, mesgBufSize),
 		sendWinSize:       defaultWinSize,
 		recvWinSize:       defaultWinSize,
@@ -525,34 +527,66 @@ func (conn *Conn) ReadMessage() (Message, uint32, error) {
 	return mesg, pack.Stream, err
 }
 
-const (
-	sendPackInitial = iota
-	sendPackRepeat
-)
-
 func (conn *Conn) SendPacket(pack *Packet) error {
+	chunkType := chunkLargest
+	packLength := uint32(len(pack.Data))
+	timestamp := pack.Timestamp
+
+	conn.sendMtx.Lock()
+	{
+		channel := conn.sendChannels[pack.Channel]
+		newChannel := channel == nil
+
+		if newChannel {
+			if len(conn.sendChannels) >= maxChannels {
+				conn.sendMtx.Unlock()
+				return ErrMaxChannels
+			}
+			channel = &SendChannel{ID: pack.Channel}
+			conn.sendChannels[pack.Channel] = channel
+		}
+
+		if newChannel || pack.Stream != channel.PackStream || channel.Timestamp > timestamp {
+			chunkType = chunkLargest
+			channel.PackStream = pack.Stream
+			channel.PackType = pack.Type
+			channel.PackLength = packLength
+			channel.Timestamp = timestamp
+		} else {
+			chunkType = chunkSmall
+			if pack.Type != channel.PackType || packLength != channel.PackLength {
+				chunkType = chunkLarge
+				channel.PackType = pack.Type
+				channel.PackLength = packLength
+			}
+			timestamp -= channel.Timestamp
+			channel.Timestamp = pack.Timestamp
+		}
+	}
+	conn.sendMtx.Unlock()
+
 	var sent uint32
-	var state = sendPackInitial
-	var packLen = uint32(len(pack.Data))
 
-	for sent < packLen {
+	for sent < packLength {
 		conn.sendMtx.Lock()
+		chunk := Chunk{Type: chunkType, Channel: pack.Channel}
 
-		var chunk Chunk
-
-		switch state {
-		case sendPackInitial:
-			chunk.Type = chunkLargest
-			chunk.Channel = pack.Channel
-			chunk.Timestamp = pack.Timestamp
+		switch chunk.Type {
+		case chunkLargest:
+			chunk.Timestamp = timestamp
 			chunk.PackStream = pack.Stream
 			chunk.PackType = pack.Type
-			chunk.PackLength = packLen
-			state = sendPackRepeat
-		case sendPackRepeat:
-			chunk.Type = chunkSmallest
-			chunk.Channel = pack.Channel
+			chunk.PackLength = packLength
+		case chunkLarge:
+			chunk.Timestamp = timestamp
+			chunk.PackType = pack.Type
+			chunk.PackLength = packLength
+		case chunkSmall:
+			chunk.Timestamp = timestamp
+		case chunkSmallest:
+			// do nothing
 		}
+		chunkType = chunkSmallest
 
 		n, err := chunk.Encode(conn.sendBuf)
 		if err != nil {
@@ -567,7 +601,7 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 			return fmt.Errorf("write chunk header: %w", err)
 		}
 
-		chunkSize := packLen - sent
+		chunkSize := packLength - sent
 		if chunkSize > conn.sendChunkSize {
 			chunkSize = conn.sendChunkSize
 		}

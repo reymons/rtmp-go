@@ -15,6 +15,7 @@ const (
 
 type RTMPServerOptions struct {
 	Addr        string
+	Stream      uint32
 	ErrorPolicy uint8
 	OnConnect   func(conn *Conn, mesg *ConnectMessage) error
 	OnPublish   func(conn *Conn, mesg *PublishStreamMessage) error
@@ -57,17 +58,21 @@ func NewRTMPServer(userOpts *RTMPServerOptions) *RTMPServer {
 func (s *RTMPServer) onConn(conn *Conn, t *testing.T) {
 	defer conn.Close()
 
-	stream, err := conn.AcceptStream(&AcceptStreamOptions{
-		OnConnect: func(mesg *ConnectMessage) error {
-			return s.opts.OnConnect(conn, mesg)
-		},
-		OnPublish: func(mesg *PublishStreamMessage) error {
-			return s.opts.OnPublish(conn, mesg)
-		},
-	})
-	if err != nil {
-		t.Fatalf("accept stream: %v", err)
-		return
+	stream := s.opts.Stream
+	if stream == 0 {
+		var err error
+		stream, err = conn.AcceptStream(&AcceptStreamOptions{
+			OnConnect: func(mesg *ConnectMessage) error {
+				return s.opts.OnConnect(conn, mesg)
+			},
+			OnPublish: func(mesg *PublishStreamMessage) error {
+				return s.opts.OnPublish(conn, mesg)
+			},
+		})
+		if err != nil {
+			t.Fatalf("accept stream: %v", err)
+			return
+		}
 	}
 
 	for {
