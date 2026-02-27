@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/reymons/rtmp-go/amf"
+	"github.com/reymons/amf-go"
 )
 
 var (

@@ -1,2 +1,4 @@
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+github.com/reymons/amf-go v1.0.0 h1:pyKvTxTulK3xEAnuTVeDnWktM8E4wVc394bXv1rjqNw=
+github.com/reymons/amf-go v1.0.0/go.mod h1:F1ZstvOKuNTn5BB6XnX5bPap61625l7Nixe7G1Xq0wg=
