@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	ErrInvalidPacket        = errors.New("invalid packet")
+	ErrUnsupportedMessage   = errors.New("unsupported message")
 	ErrInvalidStream        = errors.New("invalid stream")
 	ErrPacketTooLarge       = errors.New("packet is too large")
 	ErrChunkDataTooLarge    = errors.New("chunk data too large")
@@ -23,6 +23,7 @@ var (
 	ErrInvalidMessageData   = errors.New("invalid message data")
 	ErrInvalidChunkSize     = errors.New("invalid chunk size")
 	ErrInvalidBandwidthType = errors.New("invalid bandwidth type")
+	ErrConnClosed           = errors.New("connection closed")
 )
 
 func getMaxMesgSize(messages ...Message) uintptr {
@@ -418,6 +419,9 @@ func (conn *Conn) ReadPacket(pack *Packet) error {
 
 		channel, err := conn.readChunk()
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return ErrConnClosed
+			}
 			return fmt.Errorf("read chunk: %w", err)
 		}
 
@@ -447,7 +451,7 @@ func (conn *Conn) ReadPacket(pack *Packet) error {
 
 func (conn *Conn) packetToCmdMesg(pack *Packet) (CommandMessage, error) {
 	if pack.Type != PackCmdAMF0 {
-		return nil, ErrInvalidPacket
+		return nil, ErrUnsupportedMessage
 	}
 
 	conn.dec.SetData(pack.Data)
@@ -471,7 +475,7 @@ func (conn *Conn) packetToCmdMesg(pack *Packet) (CommandMessage, error) {
 	case CmdDeleteStream:
 		mesg = (*CloseStreamMessage)(buf)
 	default:
-		return nil, ErrInvalidPacket
+		return nil, ErrUnsupportedMessage
 	}
 
 	mesg.setLabel(hdr.Label())
@@ -494,7 +498,7 @@ func (conn *Conn) packetToBasicMesg(pack *Packet) (BasicMessage, error) {
 	case PackAudio:
 		mesg = (*AudioMessage)(buf)
 	default:
-		return nil, ErrInvalidPacket
+		return nil, ErrUnsupportedMessage
 	}
 
 	mesg.FromPacket(pack)
@@ -597,8 +601,13 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 		// TODO: buffer small writes, for now just do two syscalls
 		hdr := conn.sendBuf[:n]
 		if _, err := conn.org.Write(hdr); err != nil {
+			if errors.Is(err, io.ErrClosedPipe) {
+				err = ErrConnClosed
+			} else {
+				err = fmt.Errorf("write chunk header: %w", err)
+			}
 			conn.sendMtx.Unlock()
-			return fmt.Errorf("write chunk header: %w", err)
+			return err
 		}
 
 		chunkSize := packLength - sent
@@ -608,8 +617,13 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 
 		data := pack.Data[sent : sent+chunkSize]
 		if _, err := conn.org.Write(data); err != nil {
+			if errors.Is(err, io.ErrClosedPipe) {
+				err = ErrConnClosed
+			} else {
+				err = fmt.Errorf("write chunk data: %w", err)
+			}
 			conn.sendMtx.Unlock()
-			return fmt.Errorf("write chunk data: %w", err)
+			return err
 		}
 		sent += chunkSize
 		conn.sendMtx.Unlock()
@@ -731,7 +745,7 @@ func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
 
 		mesg, err := conn.packetToCmdMesg(&pack)
 		if err != nil {
-			if errors.Is(err, ErrInvalidPacket) {
+			if errors.Is(err, ErrUnsupportedMessage) {
 				if !conn.queuePacket(&pack) {
 					fmt.Printf("failed to enqueue a packet, skipping: %+v\n", pack)
 				}
