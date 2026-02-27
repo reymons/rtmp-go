@@ -1,6 +1,9 @@
 package rtmp
 
-import "net"
+import (
+	"crypto/tls"
+	"net"
+)
 
 type Listener interface {
 	Accept() (*Conn, error)
@@ -9,12 +12,19 @@ type Listener interface {
 }
 
 func Listen(addr string) (Listener, error) {
-	l, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
+	return &listener{ln}, nil
+}
 
-	return &listener{l}, nil
+func ListenTLS(addr string, conf *tls.Config) (Listener, error) {
+	ln, err := tls.Listen("tcp", addr, conf)
+	if err != nil {
+		return nil, err
+	}
+	return &listener{ln}, nil
 }
 
 type listener struct {
