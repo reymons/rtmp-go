@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"rtmp/amf"
+	"github.com/reymons/rtmp-go/amf"
 )
 
 type CommandReplyInfo struct {

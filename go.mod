@@ -1,4 +1,4 @@
-module rtmp
+module github.com/reymons/rtmp-go
 
 go 1.24.4
 

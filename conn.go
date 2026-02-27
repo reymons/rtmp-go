@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"rtmp/amf"
+	"github.com/reymons/rtmp-go/amf"
 )
 
 var (
