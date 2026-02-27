@@ -129,6 +129,14 @@ func newConn(org net.Conn) *Conn {
 	return conn
 }
 
+func (conn *Conn) LocalAddr() net.Addr {
+	return conn.org.LocalAddr()
+}
+
+func (conn *Conn) RemoteAddr() net.Addr {
+	return conn.org.RemoteAddr()
+}
+
 func (conn *Conn) Close() error {
 	return conn.org.Close()
 }
