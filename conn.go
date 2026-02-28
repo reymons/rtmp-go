@@ -662,12 +662,12 @@ func (conn *Conn) SendCommandMessage(mesg CommandMessage, trx, stream, channel u
 	return nil
 }
 
-func (conn *Conn) SendCommandReply(reply CommandReply, label uint8, trx, stream, channel uint32) error {
+func (conn *Conn) SendCommandMessageReply(reply CommandMessageReply, label uint8, trx, stream, channel uint32) error {
 	reply.setLabel(label)
 	return conn.SendCommandMessage(reply, trx, stream, channel)
 }
 
-func (conn *Conn) ReadCommandReply(reply CommandReply, trx uint32) error {
+func (conn *Conn) ReadCommandMessageReply(reply CommandMessageReply, trx uint32) error {
 	defer func() {
 		conn.readQueuedPackets = true
 	}()
@@ -787,16 +787,16 @@ func (conn *Conn) AcceptStream(opts *AcceptStreamOptions) (uint32, error) {
 			conn.SendCommandError(mesg.Header().Trx(), ControlStream, ctrlChannel)
 			return 0, err
 		}
-		reply := ConnectCommandReply{
+		reply := ConnectMessageReply{
 			FMSVer:       "FMS/3,5,7,7009",
 			Capabilities: 31,
-			Info: CommandReplyInfo{
+			Info: CommandMessageReplyInfo{
 				Code:           "NetConnection.Connect.Success",
 				Level:          "status",
 				ObjectEncoding: 0,
 			},
 		}
-		err = conn.SendCommandReply(&reply, CmdResult, mesg.Header().Trx(), ControlStream, ctrlChannel)
+		err = conn.SendCommandMessageReply(&reply, CmdResult, mesg.Header().Trx(), ControlStream, ctrlChannel)
 		if err != nil {
 			return 0, fmt.Errorf("send command packet: %w", err)
 		}
@@ -808,8 +808,8 @@ func (conn *Conn) AcceptStream(opts *AcceptStreamOptions) (uint32, error) {
 		if err != nil {
 			return 0, fmt.Errorf("read create stream message: %w", err)
 		}
-		reply := CreateStreamCommandReply{Stream: conn.nextStream}
-		err = conn.SendCommandReply(&reply, CmdResult, mesg.Header().Trx(), ControlStream, ctrlChannel)
+		reply := CreateStreamMessageReply{Stream: conn.nextStream}
+		err = conn.SendCommandMessageReply(&reply, CmdResult, mesg.Header().Trx(), ControlStream, ctrlChannel)
 		if err != nil {
 			return 0, fmt.Errorf("send command packet: %w", err)
 		}
@@ -827,14 +827,14 @@ func (conn *Conn) AcceptStream(opts *AcceptStreamOptions) (uint32, error) {
 			conn.SendCommandError(mesg.Header().Trx(), ControlStream, ctrlChannel)
 			return 0, err
 		}
-		reply := PublishStreamCommandReply{
-			Info: CommandReplyInfo{
+		reply := PublishStreamMessageReply{
+			Info: CommandMessageReplyInfo{
 				Level:       "status",
 				Code:        "NetStream.Play.Start",
 				Description: "Start stream",
 			},
 		}
-		err = conn.SendCommandReply(&reply, CmdInform, mesg.Header().Trx(), ControlStream, ctrlChannel)
+		err = conn.SendCommandMessageReply(&reply, CmdInform, mesg.Header().Trx(), ControlStream, ctrlChannel)
 		if err != nil {
 			return 0, fmt.Errorf("send command packet: %w", err)
 		}

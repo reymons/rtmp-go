@@ -7,7 +7,7 @@ import (
 	"github.com/reymons/amf-go"
 )
 
-type CommandReplyInfo struct {
+type CommandMessageReplyInfo struct {
 	ObjectEncoding int
 	Code           string
 	Level          string
@@ -18,7 +18,7 @@ var (
 	ErrCmdInvalidInfoCode = errors.New("invalid code for reply info")
 )
 
-func (inf *CommandReplyInfo) Encode(enc *amf.Encoder) error {
+func (inf *CommandMessageReplyInfo) Encode(enc *amf.Encoder) error {
 	info := amf.NewObject()
 	if inf.Level != "" {
 		info.AddProp("level", inf.Level)
@@ -35,7 +35,7 @@ func (inf *CommandReplyInfo) Encode(enc *amf.Encoder) error {
 	return nil
 }
 
-func (inf *CommandReplyInfo) Decode(dec *amf.Decoder) error {
+func (inf *CommandMessageReplyInfo) Decode(dec *amf.Decoder) error {
 	info, err := dec.GetObject()
 	if err != nil {
 		return fmt.Errorf("get info object: %w", err)
@@ -50,7 +50,7 @@ func (inf *CommandReplyInfo) Decode(dec *amf.Decoder) error {
 	return nil
 }
 
-type CommandReply interface {
+type CommandMessageReply interface {
 	Encode(enc *amf.Encoder) error
 
 	Decode(dec *amf.Decoder) error
@@ -61,14 +61,14 @@ type CommandReply interface {
 	setLabel(label uint8)
 }
 
-type ConnectCommandReply struct {
+type ConnectMessageReply struct {
 	cmdmesg
 	FMSVer       string
 	Capabilities int
-	Info         CommandReplyInfo
+	Info         CommandMessageReplyInfo
 }
 
-func (r *ConnectCommandReply) Encode(enc *amf.Encoder) error {
+func (r *ConnectMessageReply) Encode(enc *amf.Encoder) error {
 	if err := r.cmdmesg.Header().Encode(enc); err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func (r *ConnectCommandReply) Encode(enc *amf.Encoder) error {
 	return nil
 }
 
-func (r *ConnectCommandReply) Decode(dec *amf.Decoder) error {
+func (r *ConnectMessageReply) Decode(dec *amf.Decoder) error {
 	if err := r.cmdmesg.Header().Decode(dec); err != nil {
 		return err
 	}
@@ -98,12 +98,12 @@ func (r *ConnectCommandReply) Decode(dec *amf.Decoder) error {
 	return nil
 }
 
-type CreateStreamCommandReply struct {
+type CreateStreamMessageReply struct {
 	cmdmesg
 	Stream uint32
 }
 
-func (r *CreateStreamCommandReply) Encode(enc *amf.Encoder) error {
+func (r *CreateStreamMessageReply) Encode(enc *amf.Encoder) error {
 	if err := r.cmdmesg.Header().Encode(enc); err != nil {
 		return err
 	}
@@ -112,16 +112,16 @@ func (r *CreateStreamCommandReply) Encode(enc *amf.Encoder) error {
 	return nil
 }
 
-func (r *CreateStreamCommandReply) Decode(dec *amf.Decoder) error {
+func (r *CreateStreamMessageReply) Decode(dec *amf.Decoder) error {
 	return nil
 }
 
-type PublishStreamCommandReply struct {
+type PublishStreamMessageReply struct {
 	cmdmesg
-	Info CommandReplyInfo
+	Info CommandMessageReplyInfo
 }
 
-func (r *PublishStreamCommandReply) Encode(enc *amf.Encoder) error {
+func (r *PublishStreamMessageReply) Encode(enc *amf.Encoder) error {
 	if err := r.cmdmesg.Header().Encode(enc); err != nil {
 		return err
 	}
@@ -132,6 +132,6 @@ func (r *PublishStreamCommandReply) Encode(enc *amf.Encoder) error {
 	return nil
 }
 
-func (r *PublishStreamCommandReply) Decode(dec *amf.Decoder) error {
+func (r *PublishStreamMessageReply) Decode(dec *amf.Decoder) error {
 	return nil
 }
