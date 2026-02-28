@@ -1,9 +1,7 @@
 package rtmp
 
 import (
-	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"testing"
 )
@@ -78,10 +76,10 @@ func (s *RTMPServer) onConn(conn *Conn, t *testing.T) {
 	for {
 		mesg, err := conn.ReadStreamMessage(stream)
 		if err != nil {
-			if errors.Is(err, ErrInvalidPacket) {
+			if err == ErrUnsupportedMessage {
 				continue
 			}
-			if !errors.Is(err, io.EOF) {
+			if err != ErrConnClosed {
 				t.Fatalf("read stream message: %v", err)
 			}
 			return
