@@ -60,10 +60,10 @@ func (s *RTMPServer) onConn(conn *Conn, t *testing.T) {
 	if stream == 0 {
 		var err error
 		stream, err = conn.AcceptStream(&AcceptStreamOptions{
-			OnConnect: func(mesg *ConnectMessage) error {
+			OnConnect: func(mesg *ConnectMessage, _ any) error {
 				return s.opts.OnConnect(conn, mesg)
 			},
-			OnPublish: func(mesg *PublishStreamMessage) error {
+			OnPublish: func(mesg *PublishStreamMessage, _ any) error {
 				return s.opts.OnPublish(conn, mesg)
 			},
 		})

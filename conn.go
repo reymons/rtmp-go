@@ -770,8 +770,9 @@ func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
 }
 
 type AcceptStreamOptions struct {
-	OnConnect func(mesg *ConnectMessage) error
-	OnPublish func(mesg *PublishStreamMessage) error
+	UserData  any
+	OnConnect func(mesg *ConnectMessage, userData any) error
+	OnPublish func(mesg *PublishStreamMessage, userData any) error
 }
 
 func (conn *Conn) AcceptStream(opts *AcceptStreamOptions) (uint32, error) {
@@ -783,7 +784,7 @@ func (conn *Conn) AcceptStream(opts *AcceptStreamOptions) (uint32, error) {
 		if err != nil {
 			return 0, fmt.Errorf("read connect message: %w", err)
 		}
-		if err := opts.OnConnect(mesg.(*ConnectMessage)); err != nil {
+		if err := opts.OnConnect(mesg.(*ConnectMessage), opts.UserData); err != nil {
 			conn.SendCommandError(mesg.Header().Trx(), ControlStream, ctrlChannel)
 			return 0, err
 		}
@@ -823,7 +824,7 @@ func (conn *Conn) AcceptStream(opts *AcceptStreamOptions) (uint32, error) {
 		if err != nil {
 			return 0, fmt.Errorf("read create stream message: %w", err)
 		}
-		if err := opts.OnPublish(mesg.(*PublishStreamMessage)); err != nil {
+		if err := opts.OnPublish(mesg.(*PublishStreamMessage), opts.UserData); err != nil {
 			conn.SendCommandError(mesg.Header().Trx(), ControlStream, ctrlChannel)
 			return 0, err
 		}
