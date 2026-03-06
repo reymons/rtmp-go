@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"reflect"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -65,7 +64,6 @@ type Conn struct {
 	nextStream     uint32
 	dec            *amf.Decoder
 	enc            *amf.Encoder
-	sendMtx        sync.Mutex
 
 	readQueuedPackets bool
 	packets           []Packet
@@ -544,14 +542,12 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 	packLength := uint32(len(pack.Data))
 	timestamp := pack.Timestamp
 
-	conn.sendMtx.Lock()
 	{
 		channel := conn.sendChannels[pack.Channel]
 		newChannel := channel == nil
 
 		if newChannel {
 			if len(conn.sendChannels) >= maxChannels {
-				conn.sendMtx.Unlock()
 				return ErrMaxChannels
 			}
 			channel = &SendChannel{ID: pack.Channel}
@@ -575,12 +571,10 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 			channel.Timestamp = pack.Timestamp
 		}
 	}
-	conn.sendMtx.Unlock()
 
 	var sent uint32
 
 	for sent < packLength {
-		conn.sendMtx.Lock()
 		chunk := Chunk{Type: chunkType, Channel: pack.Channel}
 
 		switch chunk.Type {
@@ -602,7 +596,6 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 
 		n, err := chunk.Encode(conn.sendBuf)
 		if err != nil {
-			conn.sendMtx.Unlock()
 			return fmt.Errorf("encode chunk: %w", err)
 		}
 
@@ -614,7 +607,6 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 			} else {
 				err = fmt.Errorf("write chunk header: %w", err)
 			}
-			conn.sendMtx.Unlock()
 			return err
 		}
 
@@ -630,11 +622,9 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 			} else {
 				err = fmt.Errorf("write chunk data: %w", err)
 			}
-			conn.sendMtx.Unlock()
 			return err
 		}
 		sent += chunkSize
-		conn.sendMtx.Unlock()
 	}
 
 	return nil
