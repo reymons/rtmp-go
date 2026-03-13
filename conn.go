@@ -45,6 +45,8 @@ var mesgBufSize = getMaxMesgSize(
 	CreateStreamMessage{},
 	PublishStreamMessage{},
 	CloseStreamMessage{},
+	// Data messages
+	MetaDataMessage{},
 )
 
 type Conn struct {
@@ -455,6 +457,44 @@ func (conn *Conn) ReadPacket(pack *Packet) error {
 	}
 }
 
+func (conn *Conn) packetToDataMesg(pack *Packet) (DataMessage, error) {
+	if pack.Type != PackDataAMF0 {
+		return nil, ErrUnsupportedMessage
+	}
+
+	conn.dec.SetData(pack.Data)
+	cmd, err := conn.dec.GetString()
+	if err != nil {
+		return nil, fmt.Errorf("decode data message command: %w", err)
+	}
+
+	buf := unsafe.Pointer(&conn.mesgBuf[0])
+	var mesg DataMessage
+
+	switch cmd {
+	case DataMesgSetDataFrame:
+		event, err := conn.dec.GetString()
+		if err != nil {
+			return nil, fmt.Errorf("decode data message event: %w", err)
+		}
+
+		switch event {
+		case DataMesgEventMetaData:
+			mesg = (*MetaDataMessage)(buf)
+		default:
+			return nil, ErrUnsupportedMessage
+		}
+
+	default:
+		return nil, ErrUnsupportedMessage
+	}
+
+	if err := mesg.Decode(conn.dec); err != nil {
+		return nil, fmt.Errorf("decode data message: %w", err)
+	}
+	return mesg, nil
+}
+
 func (conn *Conn) packetToCmdMesg(pack *Packet) (CommandMessage, error) {
 	if pack.Type != PackCmdAMF0 {
 		return nil, ErrUnsupportedMessage
@@ -530,6 +570,8 @@ func (conn *Conn) ReadMessage() (Message, uint32, error) {
 
 	if pack.Type == PackCmdAMF0 {
 		mesg, err = conn.packetToCmdMesg(&pack)
+	} else if pack.Type == PackDataAMF0 {
+		mesg, err = conn.packetToDataMesg(&pack)
 	} else {
 		mesg, err = conn.packetToBasicMesg(&pack)
 	}
