@@ -5,9 +5,9 @@ RTMP implementation in Go
 You can check out an example [here](https://github.com/reymons/lively_backend/blob/master/transport/rtmp/rtmp.go)
 
 ## Caveats
-It is not a full implementation of RTMP spec but there is a basic functionality allowing one to work with live-streaming<br>
-The library does not work with AMF3 and there is no plans of adding it<br>
-There's also no convenient client-side API (you can only send raw packets) but I plan to add it in the future, someday...<br>
+- It is not a full implementation of RTMP spec but there is a basic functionality allowing one to work with live-streaming<br>
+- The library does not work with AMF3 and there is no plans of adding it<br>
+- There's also no convenient client-side API (you can only send raw packets) but I plan to add it in the future, someday...<br>
 
 ## Basic usage
 The main idea is
