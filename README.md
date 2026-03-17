@@ -7,7 +7,7 @@ You can check out an example [here](https://github.com/reymons/lively_backend/bl
 ## Caveats
 - It is not a full implementation of RTMP spec but there is a basic functionality allowing one to work with live-streaming<br>
 - The library does not work with AMF3 and there is no plans of adding it<br>
-- There's also no convenient client-side API (you can only send raw packets) but I plan to add it in the future, someday...<br>
+- There's also no convenient client-side API (you can only connect to a server and send raw packets) but I plan to add it in the future, someday...<br>
 
 ## Basic usage
 The main idea is
@@ -113,22 +113,41 @@ case rtmp.PackAudio:
   // ...
 }
 ```
-Client-wise, there's nothing you can use at the moment except for `SendPacket`<br>
-For example, send "Hello" as a video packet every 16ms for some hidden reason
+Client-wise, there's nothing you can use at the moment except for `Dial` and `SendPacket`<br>
+For example, connect to a RTMP server and start sending "Hello" as a video packet every 16ms for some hidden reason
 ```golang
-var timestamp uint32
-for {
-    packet := rtmp.Packet{
-        Channel: 2,
-        Stream: 5,
-        Type: rtmp.PackVideo,
-        Timestamp: timestamp,
-        Data: []byte("Hello"),
-    }
-    time.Sleep(time.Millisecond * 16)
-    timestamp += 16
-}
+package main
 
+import (
+	"log"
+	"time"
+
+	"github.com/reymons/rtmp-go"
+)
+
+func main() {
+	conn, err := rtmp.Dial("localhost:1935")
+	if err != nil {
+		log.Fatalf("ERROR: dial: %v", err)
+		return
+	}
+
+	var timestamp uint32
+	for {
+	    packet := rtmp.Packet{
+	        Channel: 2,
+	        Stream: 5,
+	        Type: rtmp.PackVideo,
+	        Timestamp: timestamp,
+	        Data: []byte("Hello"),
+	    }
+		if err := conn.SendPacket(&packet); err != nil {
+			log.Printf("ERROR: send packet: %v", err)
+		}
+	    time.Sleep(time.Millisecond * 16)
+	    timestamp += 16
+	}
+}
 ```
 
 ## Reference
