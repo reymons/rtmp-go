@@ -149,7 +149,31 @@ func main() {
 	}
 }
 ```
+## Media messages
+Each time the first chunk of a video message is received, `ReadMessage` (as well as `ReadStreamMessage`) returns a `VideoMessage` struct containing a message payload reader
+```golang
+type VideoMessage struct {
+	Length 	  uint32
+	Timestamp uint32
+	Data 	  io.Reader
+}
+```
+Upon reaching the end of the message payload, the reader returns `err == io.EOF`<br>
+You *must* read the full message payload in order to process other messages
+```golang
+// Forward video data in chunks of 4096 bytes to the writer
+func fn() {
+	videoData := make([]byte, 4096)
+	writer := SomeWriter{}
 
+	for {
+		mesg, _ := conn.ReadMessageStream(stream)
+		m := mesg.(*rtmp.VideoMessage)
+		_, _ = io.CopyBuffer(writer, m.Data, videoData)
+	}
+}
+```
+All of the above applies to the `AudioMessage` as well
 ## Reference
 - https://veovera.org/docs/legacy/rtmp-v1-0-spec.pdf
 - https://en.wikipedia.org/wiki/Action_Message_Format
