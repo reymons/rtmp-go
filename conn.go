@@ -1,6 +1,7 @@
 package rtmp
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -14,15 +15,13 @@ import (
 )
 
 var (
-	ErrUnsupportedMessage   = errors.New("unsupported message")
-	ErrInvalidStream        = errors.New("invalid stream")
-	ErrPacketTooLarge       = errors.New("packet is too large")
-	ErrChunkDataTooLarge    = errors.New("chunk data too large")
-	ErrMaxChannels          = errors.New("maximum number of active channels has been reached")
-	ErrInvalidMessageData   = errors.New("invalid message data")
-	ErrInvalidChunkSize     = errors.New("invalid chunk size")
-	ErrInvalidBandwidthType = errors.New("invalid bandwidth type")
-	ErrConnClosed           = errors.New("connection closed")
+	ErrUnsupportedMessage     = errors.New("unsupported message")
+	ErrInvalidStream          = errors.New("invalid stream")
+	ErrMaxChannels            = errors.New("maximum number of active channels has been reached")
+	ErrInvalidChunkSize       = errors.New("invalid chunk size")
+	ErrInvalidBandwidthType   = errors.New("invalid bandwidth type")
+	ErrConnClosed             = errors.New("connection closed")
+	ErrNonMediaPacketTooLarge = errors.New("non-media packet is too large")
 )
 
 func getMaxMesgSize(messages ...Message) uintptr {
@@ -49,14 +48,24 @@ var mesgBufSize = getMaxMesgSize(
 	MetaDataMessage{},
 )
 
+const defaultChunkSize uint32 = 128
+const defaultWinSize = 25000000
+const maxChannels = 10
+const readDeadline = time.Second * 15
+const maxChunkSize = 128 * 1024
+const maxNonMediaPackLen = 4096
+const ctrlChannel = 2
+
+const ControlStream = 0
+
 type Conn struct {
 	org            net.Conn
-	reader         io.Reader
+	reader         *connReader
 	epoch          uint32
 	recvChunkSize  uint32
 	sendChunkSize  uint32
-	channels       map[uint32]*Channel
-	sendChannels   map[uint32]*SendChannel
+	channels       map[uint32]*chunkChannel
+	sendChannels   map[uint32]*sendChunkChannel
 	sendBuf        []byte
 	mesgBuf        []uintptr // use uintptr for alignment
 	sendWinSize    uint32
@@ -66,26 +75,11 @@ type Conn struct {
 	nextStream     uint32
 	dec            *amf.Decoder
 	enc            *amf.Encoder
-
-	readQueuedPackets bool
-	packets           []Packet
-	packetsRd         int
-	packetsWr         int
 }
 
-const defaultChunkSize uint32 = 128
-const defaultWinSize = 25000000
-const maxChannels = 10
-const readDeadline = time.Second * 15
-const maxPackLength = 1024 * 1024
-const maxPackLengthInQueue = 512
-const packQueueSize = 10
-const ctrlChannel = 2
-
-const ControlStream = 0
-
 type connReader struct {
-	conn *Conn
+	conn   *Conn
+	reader *bufio.Reader
 }
 
 func (r *connReader) Read(data []byte) (int, error) {
@@ -93,7 +87,7 @@ func (r *connReader) Read(data []byte) (int, error) {
 		return 0, err
 	}
 
-	n, err := r.conn.org.Read(data)
+	n, err := r.reader.Read(data)
 	r.conn.totalRecvBytes += uint32(n)
 
 	unackedBytes := r.conn.totalRecvBytes - r.conn.lastAckedBytes
@@ -109,21 +103,22 @@ func (r *connReader) Read(data []byte) (int, error) {
 
 func newConn(org net.Conn) *Conn {
 	conn := &Conn{
-		org:               org,
-		recvChunkSize:     defaultChunkSize,
-		channels:          make(map[uint32]*Channel),
-		sendChannels:      make(map[uint32]*SendChannel),
-		mesgBuf:           make([]uintptr, mesgBufSize),
-		sendWinSize:       defaultWinSize,
-		recvWinSize:       defaultWinSize,
-		nextStream:        1,
-		packets:           make([]Packet, packQueueSize+1),
-		readQueuedPackets: true,
-		enc:               amf.NewEncoder(),
-		dec:               amf.NewDecoder(),
+		org:           org,
+		recvChunkSize: defaultChunkSize,
+		channels:      make(map[uint32]*chunkChannel),
+		sendChannels:  make(map[uint32]*sendChunkChannel),
+		mesgBuf:       make([]uintptr, mesgBufSize),
+		sendWinSize:   defaultWinSize,
+		recvWinSize:   defaultWinSize,
+		nextStream:    1,
+		enc:           amf.NewEncoder(),
+		dec:           amf.NewDecoder(),
 	}
 
-	conn.reader = &connReader{conn}
+	conn.reader = &connReader{
+		conn:   conn,
+		reader: bufio.NewReaderSize(org, maxChunkHdrSize),
+	}
 	conn.setSendChunkSize(defaultChunkSize)
 
 	return conn
@@ -152,114 +147,12 @@ func (conn *Conn) sendAck() error {
 	return err
 }
 
-func (conn *Conn) readQueuedPacket(pack *Packet) bool {
-	if conn.packetsRd == conn.packetsWr {
-		return false
-	}
-	*pack = conn.packets[conn.packetsRd]
-	conn.packetsRd = (conn.packetsRd + 1) % len(conn.packets)
-	return true
-}
-
-func (conn *Conn) queuePacket(pack *Packet) bool {
-	if len(pack.Data) > maxPackLengthInQueue {
-		return false
-	}
-	if conn.packetsRd == (conn.packetsWr+1)%len(conn.packets) {
-		return false
-	}
-	if pack.Type == PackUserCtrl {
-		// I'm not even sure if I need to buffer anything expect for user control messages
-		//
-		// The whole packet queueing thingy should rarely come into play,
-		// so it's okay to allocate a buffer like that for now
-		//
-		// TODO: use buffer pool?
-		data := make([]byte, len(pack.Data))
-		copy(data, pack.Data)
-		conn.packets[conn.packetsWr] = *pack
-		conn.packets[conn.packetsWr].Data = data
-		conn.packetsWr = (conn.packetsWr + 1) % len(conn.packets)
-	}
-	return true
-}
-
-// If a message's been fully read, returns a non-nil channel that handled it
-func (conn *Conn) readChunk() (*Channel, error) {
-	var chunk Chunk
-	if err := chunk.Decode(conn.reader); err != nil {
-		return nil, fmt.Errorf("decode chunk: %w", err)
-	}
-
-	if (chunk.Type == chunkLargest || chunk.Type == chunkLarge) && chunk.PackLength > maxPackLength {
-		// TODO: maybe skip the message entirely by reading out the remaining chunks?
-		return nil, ErrPacketTooLarge
-	}
-
-	// Get a channel, otherwise create it
-	channel := conn.channels[chunk.Channel]
-	if channel == nil {
-		if len(conn.channels) >= maxChannels {
-			return nil, ErrMaxChannels
-		}
-		channel = &Channel{ID: chunk.Channel}
-		conn.channels[chunk.Channel] = channel
-	}
-
-	switch chunk.Type {
-	case chunkLargest:
-		channel.Timestamp = chunk.Timestamp
-		channel.TimestampDelta = 0
-		channel.PackStream = chunk.PackStream
-		channel.PackLength = chunk.PackLength
-		channel.PackType = chunk.PackType
-		channel.RecvBytes = 0
-	case chunkLarge:
-		channel.TimestampDelta = chunk.Timestamp
-		channel.PackLength = chunk.PackLength
-		channel.PackType = chunk.PackType
-		channel.RecvBytes = 0
-	case chunkSmall:
-		channel.TimestampDelta = chunk.Timestamp
-	case chunkSmallest:
-		// do nothing
-	}
-
-	if channel.PackLength > uint32(len(channel.RecvBuf)) {
-		size := uint32(len(channel.RecvBuf)) + 128
-		for size < channel.PackLength {
-			size *= 2
-		}
-		channel.RecvBuf = make([]byte, size)
-	}
-
-	chunkSize := channel.PackLength - channel.RecvBytes
-	if chunkSize > conn.recvChunkSize {
-		chunkSize = conn.recvChunkSize
-	}
-
-	rb := channel.RecvBytes
-	data := channel.RecvBuf[rb : rb+chunkSize]
-	if _, err := io.ReadFull(conn.reader, data); err != nil {
-		return nil, fmt.Errorf("read chunk payload: %w", err)
-	}
-	channel.RecvBytes += uint32(len(data))
-
-	if channel.RecvBytes >= channel.PackLength {
-		channel.Timestamp += channel.TimestampDelta
-		channel.RecvBytes = 0
-		return channel, nil
-	}
-
-	return nil, nil
-}
-
 func (conn *Conn) sendControlPack(typ uint8, data []byte) error {
 	return conn.SendPacket(&Packet{
 		Type:    typ,
 		Channel: ctrlChannel,
 		Stream:  ControlStream,
-		Data:    data,
+		DataRaw: data,
 	})
 }
 
@@ -275,7 +168,7 @@ func (conn *Conn) setSendChunkSize(size uint32) {
 }
 
 func (conn *Conn) SetChunkSize(size uint32) error {
-	if size < 1 || size > maxPackLength {
+	if size < 1 || size > maxChunkSize {
 		return ErrInvalidChunkSize
 	}
 	data := make([]byte, 4)
@@ -288,12 +181,13 @@ func (conn *Conn) SetChunkSize(size uint32) error {
 }
 
 func (conn *Conn) onSetChunkSize(pack *Packet) error {
-	if len(pack.Data) != 4 {
-		return ErrInvalidMessageData
+	data := make([]byte, 4)
+	if _, err := io.ReadFull(pack.Data, data); err != nil {
+		return err
 	}
 
-	size := binary.BigEndian.Uint32(pack.Data)
-	if size < 1 || size > maxPackLength {
+	size := binary.BigEndian.Uint32(data)
+	if size < 1 || size > maxChunkSize {
 		return ErrInvalidChunkSize
 	}
 	Debugf("New receive chunk size: %d\n", size)
@@ -309,13 +203,13 @@ func (conn *Conn) AbortMessage(csid uint32) error {
 }
 
 func (conn *Conn) onAbort(pack *Packet) error {
-	if len(pack.Data) != 4 {
-		return ErrInvalidMessageData
+	data := make([]byte, 4)
+	if _, err := io.ReadFull(pack.Data, data); err != nil {
+		return err
 	}
 
-	id := binary.BigEndian.Uint32(pack.Data)
+	id := binary.BigEndian.Uint32(data)
 	if channel := conn.channels[id]; channel != nil {
-		channel.RecvBytes = 0
 		// TODO: restore channel's state as it was before accepting the first chunk of the current message
 	}
 
@@ -332,10 +226,11 @@ func (conn *Conn) SetWinAckSize(size uint32) error {
 }
 
 func (conn *Conn) onWinAckSize(pack *Packet) error {
-	if len(pack.Data) != 4 {
-		return ErrInvalidMessageData
+	data := make([]byte, 4)
+	if _, err := io.ReadFull(pack.Data, data); err != nil {
+		return err
 	}
-	conn.recvWinSize = binary.BigEndian.Uint32(pack.Data)
+	conn.recvWinSize = binary.BigEndian.Uint32(pack.DataRaw)
 	Debugf("New receive win ack size: %d\n", conn.recvWinSize)
 	return nil
 }
@@ -360,16 +255,17 @@ func (conn *Conn) SetBandwidth(size uint32, typ uint8) error {
 }
 
 func (conn *Conn) onSetBandwidth(pack *Packet) error {
-	if len(pack.Data) != 5 {
-		return ErrInvalidMessageData
+	data := make([]byte, 5)
+	if _, err := io.ReadFull(pack.Data, data); err != nil {
+		return err
 	}
 
-	typ := pack.Data[4]
+	typ := data[4]
 	if typ >= bwTotal {
 		return ErrInvalidBandwidthType
 	}
 
-	size := binary.BigEndian.Uint32(pack.Data)
+	size := binary.BigEndian.Uint32(data)
 	newSize := size
 
 	if typ == BWSoft && size > conn.sendWinSize {
@@ -389,10 +285,11 @@ func (conn *Conn) onSetBandwidth(pack *Packet) error {
 }
 
 func (conn *Conn) onAck(pack *Packet) error {
-	if len(pack.Data) != 4 {
-		return ErrInvalidMessageData
+	data := make([]byte, 4)
+	if _, err := io.ReadFull(pack.Data, data); err != nil {
+		return err
 	}
-	size := binary.BigEndian.Uint32(pack.Data)
+	size := binary.BigEndian.Uint32(data)
 	Debugf("Received ack: %d\n", size)
 	return nil
 }
@@ -419,12 +316,35 @@ func (conn *Conn) onControlPacket(pack *Packet) (bool, error) {
 	return handled, err
 }
 
+func (conn *Conn) getOrCreateChannel(id uint32) (*chunkChannel, error) {
+	channel := conn.channels[id]
+	if channel == nil {
+		if len(conn.channels) >= maxChannels {
+			return nil, ErrMaxChannels
+		}
+		channel = &chunkChannel{id: id, conn: conn}
+		conn.channels[id] = channel
+	}
+	return channel, nil
+}
+
+// Returns a channel that handled the read chunk
+func (conn *Conn) readChunk() (*chunkChannel, error) {
+	var chunk rtmpChunk
+	if err := chunk.decode(conn.reader); err != nil {
+		return nil, fmt.Errorf("decode chunk: %w", err)
+	}
+	Debugf("NEW CHUNK: %+v", chunk)
+	channel, err := conn.getOrCreateChannel(chunk.channel)
+	if err != nil {
+		return nil, fmt.Errorf("get or create channel: %w", err)
+	}
+	channel.HandleChunk(&chunk)
+	return channel, nil
+}
+
 func (conn *Conn) ReadPacket(pack *Packet) error {
 	for {
-		if conn.readQueuedPackets && conn.readQueuedPacket(pack) {
-			return nil
-		}
-
 		channel, err := conn.readChunk()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -433,15 +353,14 @@ func (conn *Conn) ReadPacket(pack *Packet) error {
 			return fmt.Errorf("read chunk: %w", err)
 		}
 
-		if channel == nil {
-			continue
-		}
+		pack.Channel = channel.id
+		pack.Stream = channel.packStream
+		pack.Type = channel.packType
+		pack.Timestamp = channel.timestamp
+		pack.Length = channel.packLength
+		pack.Data = channel
 
-		pack.Channel = channel.ID
-		pack.Stream = channel.PackStream
-		pack.Type = channel.PackType
-		pack.Timestamp = channel.Timestamp
-		pack.Data = channel.RecvBuf[:channel.PackLength]
+		Debugf("NEW PACKET: %+v", pack)
 
 		if pack.Stream == ControlStream {
 			handled, err := conn.onControlPacket(pack)
@@ -458,11 +377,12 @@ func (conn *Conn) ReadPacket(pack *Packet) error {
 }
 
 func (conn *Conn) packetToDataMesg(pack *Packet) (DataMessage, error) {
-	if pack.Type != PackDataAMF0 {
-		return nil, ErrUnsupportedMessage
+	data, err := io.ReadAll(pack.Data)
+	if err != nil {
+		return nil, fmt.Errorf("read packet data: %w", err)
 	}
 
-	conn.dec.SetData(pack.Data)
+	conn.dec.SetData(data)
 	cmd, err := conn.dec.GetString()
 	if err != nil {
 		return nil, fmt.Errorf("decode data message command: %w", err)
@@ -471,12 +391,16 @@ func (conn *Conn) packetToDataMesg(pack *Packet) (DataMessage, error) {
 	buf := unsafe.Pointer(&conn.mesgBuf[0])
 	var mesg DataMessage
 
+	Debugf("NEW DATA MESSAGE: %s", cmd)
+
 	switch cmd {
 	case DataMesgSetDataFrame:
 		event, err := conn.dec.GetString()
 		if err != nil {
 			return nil, fmt.Errorf("decode data message event: %w", err)
 		}
+
+		Debugf("NEW DATA MESSAGE EVENT: %s", event)
 
 		switch event {
 		case DataMesgEventMetaData:
@@ -496,11 +420,11 @@ func (conn *Conn) packetToDataMesg(pack *Packet) (DataMessage, error) {
 }
 
 func (conn *Conn) packetToCmdMesg(pack *Packet) (CommandMessage, error) {
-	if pack.Type != PackCmdAMF0 {
-		return nil, ErrUnsupportedMessage
+	data, err := io.ReadAll(pack.Data)
+	if err != nil {
+		return nil, fmt.Errorf("read packet data: %w", err)
 	}
-
-	conn.dec.SetData(pack.Data)
+	conn.dec.SetData(data)
 
 	hdr := CommandHeader{}
 	if err := hdr.Decode(conn.dec); err != nil {
@@ -510,6 +434,8 @@ func (conn *Conn) packetToCmdMesg(pack *Packet) (CommandMessage, error) {
 	buf := unsafe.Pointer(&conn.mesgBuf[0])
 
 	var mesg CommandMessage
+
+	Debugf("NEW CMD MESSAGE: %s", hdr.LabelString())
 
 	switch hdr.Label() {
 	case CmdConnect:
@@ -562,7 +488,14 @@ func (conn *Conn) ReadStreamMessage(stream uint32) (Message, error) {
 func (conn *Conn) ReadMessage() (Message, uint32, error) {
 	var pack Packet
 	if err := conn.ReadPacket(&pack); err != nil {
-		return nil, 0, err
+		if err == ErrConnClosed {
+			return nil, 0, err
+		}
+		return nil, 0, fmt.Errorf("read packet: %w", err)
+	}
+
+	if pack.Type != PackVideo && pack.Type != PackAudio && pack.Length >= maxNonMediaPackLen {
+		return nil, 0, ErrNonMediaPacketTooLarge
 	}
 
 	var mesg Message
@@ -576,12 +509,18 @@ func (conn *Conn) ReadMessage() (Message, uint32, error) {
 		mesg, err = conn.packetToBasicMesg(&pack)
 	}
 
+	if err == ErrUnsupportedMessage {
+		if err := pack.discard(); err != nil {
+			return nil, 0, fmt.Errorf("discard packet data: %w", err)
+		}
+	}
+
 	return mesg, pack.Stream, err
 }
 
 func (conn *Conn) SendPacket(pack *Packet) error {
 	chunkType := chunkLargest
-	packLength := uint32(len(pack.Data))
+	packLength := uint32(len(pack.DataRaw))
 	timestamp := pack.Timestamp
 
 	{
@@ -592,51 +531,54 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 			if len(conn.sendChannels) >= maxChannels {
 				return ErrMaxChannels
 			}
-			channel = &SendChannel{ID: pack.Channel}
+			channel = &sendChunkChannel{id: pack.Channel}
 			conn.sendChannels[pack.Channel] = channel
 		}
 
-		if newChannel || pack.Stream != channel.PackStream || channel.Timestamp > timestamp {
+		if newChannel || pack.Stream != channel.packStream || channel.timestamp > timestamp {
 			chunkType = chunkLargest
-			channel.PackStream = pack.Stream
-			channel.PackType = pack.Type
-			channel.PackLength = packLength
-			channel.Timestamp = timestamp
+			channel.packStream = pack.Stream
+			channel.packType = pack.Type
+			channel.packLength = packLength
+			channel.timestamp = timestamp
 		} else {
 			chunkType = chunkSmall
-			if pack.Type != channel.PackType || packLength != channel.PackLength {
+			if pack.Type != channel.packType || packLength != channel.packLength {
 				chunkType = chunkLarge
-				channel.PackType = pack.Type
-				channel.PackLength = packLength
+				channel.packType = pack.Type
+				channel.packLength = packLength
 			}
-			timestamp -= channel.Timestamp
-			channel.Timestamp = pack.Timestamp
+			timestamp -= channel.timestamp
+			channel.timestamp = pack.Timestamp
 		}
 	}
 
 	var sent uint32
 
 	for sent < packLength {
-		chunk := Chunk{Type: chunkType, Channel: pack.Channel}
+		chunk := rtmpChunk{
+			chunkType: chunkType,
+			channel:   pack.Channel,
+		}
 
-		switch chunk.Type {
+		switch chunk.chunkType {
 		case chunkLargest:
-			chunk.Timestamp = timestamp
-			chunk.PackStream = pack.Stream
-			chunk.PackType = pack.Type
-			chunk.PackLength = packLength
+			chunk.timestamp = timestamp
+			chunk.packStream = pack.Stream
+			chunk.packType = pack.Type
+			chunk.packLength = packLength
 		case chunkLarge:
-			chunk.Timestamp = timestamp
-			chunk.PackType = pack.Type
-			chunk.PackLength = packLength
+			chunk.timestamp = timestamp
+			chunk.packType = pack.Type
+			chunk.packLength = packLength
 		case chunkSmall:
-			chunk.Timestamp = timestamp
+			chunk.timestamp = timestamp
 		case chunkSmallest:
 			// do nothing
 		}
 		chunkType = chunkSmallest
 
-		n, err := chunk.Encode(conn.sendBuf)
+		n, err := chunk.encode(conn.sendBuf)
 		if err != nil {
 			return fmt.Errorf("encode chunk: %w", err)
 		}
@@ -657,7 +599,7 @@ func (conn *Conn) SendPacket(pack *Packet) error {
 			chunkSize = conn.sendChunkSize
 		}
 
-		data := pack.Data[sent : sent+chunkSize]
+		data := pack.DataRaw[sent : sent+chunkSize]
 		if _, err := conn.org.Write(data); err != nil {
 			if errors.Is(err, io.ErrClosedPipe) {
 				err = ErrConnClosed
@@ -677,7 +619,7 @@ func (conn *Conn) SendCommandPacket(stream, channel uint32, data []byte) error {
 		Stream:  stream,
 		Channel: channel,
 		Type:    PackCmdAMF0,
-		Data:    data,
+		DataRaw: data,
 	}
 	return conn.SendPacket(&pack)
 }
@@ -700,11 +642,6 @@ func (conn *Conn) SendCommandMessageReply(reply CommandMessageReply, label uint8
 }
 
 func (conn *Conn) ReadCommandMessageReply(reply CommandMessageReply, trx uint32) error {
-	defer func() {
-		conn.readQueuedPackets = true
-	}()
-	conn.readQueuedPackets = false
-
 	for {
 		var pack Packet
 		if err := conn.ReadPacket(&pack); err != nil {
@@ -712,35 +649,31 @@ func (conn *Conn) ReadCommandMessageReply(reply CommandMessageReply, trx uint32)
 		}
 
 		if pack.Type != PackCmdAMF0 {
-			if !conn.queuePacket(&pack) {
-				fmt.Printf("failed to queue a packet, skipping...\n")
+			if err := pack.discard(); err != nil {
+				return fmt.Errorf("drain packet data: %w", err)
 			}
 			continue
 		}
 
-		conn.dec.SetData(pack.Data)
+		conn.dec.SetData(pack.DataRaw)
 		hdr := CommandHeader{}
 		if err := hdr.Decode(conn.dec); err != nil {
 			return fmt.Errorf("decode command header: %w", err)
 		}
 
 		if hdr.Trx() != trx {
-			if !conn.queuePacket(&pack) {
-				fmt.Printf("failed to queue a packet, skipping...\n")
-			}
+			// TODO: if other transaction comes in, do something
 			continue
 		}
 
 		switch hdr.Label() {
 		case CmdResult, CmdError, CmdInform:
-			conn.dec.SetData(pack.Data)
+			conn.dec.SetData(pack.DataRaw)
 			if err := reply.Decode(conn.dec); err != nil {
 				return fmt.Errorf("decode reply: %w", err)
 			}
 		default:
-			if !conn.queuePacket(&pack) {
-				fmt.Printf("failed to queue a packet, skipping...\n")
-			}
+			// TODO: handle default case
 		}
 	}
 }
@@ -758,18 +691,12 @@ func (conn *Conn) SendCommandError(trx, stream, channel uint32) error {
 		Channel: channel,
 		Stream:  stream,
 		Type:    PackCmdAMF0,
-		Data:    conn.enc.Data(),
+		DataRaw: conn.enc.Data(),
 	}
 	return conn.SendPacket(&pack)
 }
 
 func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
-	conn.readQueuedPackets = false
-
-	defer func(conn *Conn) {
-		conn.readQueuedPackets = true
-	}(conn)
-
 	for {
 		var pack Packet
 		if err := conn.ReadPacket(&pack); err != nil {
@@ -777,17 +704,17 @@ func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
 		}
 
 		if pack.Type != PackCmdAMF0 {
-			if !conn.queuePacket(&pack) {
-				fmt.Printf("failed to enqueue a packet, skipping: %+v\n", pack)
+			if err := pack.discard(); err != nil {
+				return nil, fmt.Errorf("drain packet data: %w", err)
 			}
 			continue
 		}
 
 		mesg, err := conn.packetToCmdMesg(&pack)
 		if err != nil {
-			if errors.Is(err, ErrUnsupportedMessage) {
-				if !conn.queuePacket(&pack) {
-					fmt.Printf("failed to enqueue a packet, skipping: %+v\n", pack)
+			if err == ErrUnsupportedMessage {
+				if err := pack.discard(); err != nil {
+					return nil, fmt.Errorf("drain packet data: %w", err)
 				}
 				continue
 			}
@@ -795,8 +722,6 @@ func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
 		}
 		if mesg.Header().Label() == label {
 			return mesg, nil
-		} else if !conn.queuePacket(&pack) {
-			fmt.Printf("failed to enqueue a packet, skipping: %+v\n", pack)
 		}
 	}
 }

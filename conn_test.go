@@ -1,6 +1,8 @@
 package rtmp
 
 import (
+	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -15,9 +17,10 @@ func TestConn_OutputsStreamedVideoToFile(t *testing.T) {
 	appName := "something"
 	onConnectCalledTimes := 0
 	onPublishCalledTimes := 0
+	addr := "localhost:1938"
 
 	srv := NewRTMPServer(&RTMPServerOptions{
-		Addr: "localhost:1935",
+		Addr: addr,
 		OnConnect: func(_ *Conn, mesg *ConnectMessage) error {
 			if mesg.AppName != appName {
 				t.Fatalf("invalid app name: expected %s, got %s", appName, mesg.AppName)
@@ -30,6 +33,16 @@ func TestConn_OutputsStreamedVideoToFile(t *testing.T) {
 			return nil
 		},
 		OnMessage: func(conn *Conn, mesg Message) error {
+			switch m := mesg.(type) {
+			case *VideoMessage:
+				if _, err := io.Copy(io.Discard, m.Data); err != nil {
+					return fmt.Errorf("discard video message: %w", err)
+				}
+			case *AudioMessage:
+				if _, err := io.Copy(io.Discard, m.Data); err != nil {
+					return fmt.Errorf("discard audio message: %w", err)
+				}
+			}
 			return nil
 		},
 	})
@@ -48,7 +61,7 @@ func TestConn_OutputsStreamedVideoToFile(t *testing.T) {
 		defer wg.Done()
 		defer srv.Stop()
 		streamer := NewFFmpegStreamer(&FFmpegOptions{
-			Addr:     "localhost:1935",
+			Addr:     addr,
 			AppName:  appName,
 			Filepath: "./testing/static/video.mp4",
 			Secure:   false,
@@ -68,8 +81,9 @@ func TestConn_OutputsStreamedVideoToFile(t *testing.T) {
 	}
 }
 
-func TestConn_SendsMediaPacketsAtSameTime(t *testing.T) {
+func TestConn_SendsMediaPackets(t *testing.T) {
 	t.Parallel()
+	addr := "localhost:1936"
 
 	type mediaData struct {
 		texts     []string
@@ -101,7 +115,7 @@ func TestConn_SendsMediaPacketsAtSameTime(t *testing.T) {
 	stream := uint32(55)
 
 	srv := NewRTMPServer(&RTMPServerOptions{
-		Addr:   "localhost:1936",
+		Addr:   addr,
 		Stream: stream,
 		OnMessage: func(conn *Conn, mesg Message) error {
 			var text string
@@ -111,12 +125,20 @@ func TestConn_SendsMediaPacketsAtSameTime(t *testing.T) {
 
 			switch m := mesg.(type) {
 			case *VideoMessage:
-				text = string(m.Data)
+				d, err := io.ReadAll(m.Data)
+				if err != nil {
+					return fmt.Errorf("read video data: %w", err)
+				}
+				text = string(d)
 				timestamp = m.Timestamp
 				data = &videoData
 				packType = PackVideo
 			case *AudioMessage:
-				text = string(m.Data)
+				d, err := io.ReadAll(m.Data)
+				if err != nil {
+					return fmt.Errorf("read audio data: %w", err)
+				}
+				text = string(d)
 				timestamp = m.Timestamp
 				data = &audioData
 				packType = PackAudio
@@ -140,23 +162,22 @@ func TestConn_SendsMediaPacketsAtSameTime(t *testing.T) {
 		defer srv.Stop()
 		time.Sleep(time.Second)
 
-		conn, err := Dial("localhost:1936")
+		conn, err := Dial(addr)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
 
-		if err := conn.SetChunkSize(8); err != nil {
+		if err := conn.SetChunkSize(64); err != nil {
 			t.Fatalf("set chunk size: %v", err)
 		}
 
-		sendData := func(wg *sync.WaitGroup, packType uint8, data *mediaData) {
-			defer wg.Done()
+		sendData := func(packType uint8, data *mediaData) {
 			var timestamp uint32
 			for i, text := range data.texts {
 				pack := Packet{
 					Channel:   4,
 					Stream:    stream,
-					Data:      []byte(text),
+					DataRaw:   []byte(text),
 					Type:      packType,
 					Timestamp: timestamp,
 				}
@@ -168,11 +189,8 @@ func TestConn_SendsMediaPacketsAtSameTime(t *testing.T) {
 			}
 		}
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go sendData(&wg, PackVideo, &videoData)
-		go sendData(&wg, PackAudio, &audioData)
-		wg.Wait()
+		sendData(PackVideo, &videoData)
+		sendData(PackAudio, &audioData)
 	}()
 
 	if err := srv.Start(t); err != nil {

@@ -1,5 +1,7 @@
 package rtmp
 
+import "io"
+
 type Message interface{}
 
 type BasicMessage interface {
@@ -8,20 +10,24 @@ type BasicMessage interface {
 
 type VideoMessage struct {
 	Timestamp uint32
-	Data      []byte
+	Length    uint32
+	Data      io.Reader
 }
 
 func (m *VideoMessage) FromPacket(pack *Packet) {
 	m.Timestamp = pack.Timestamp
+	m.Length = pack.Length
 	m.Data = pack.Data
 }
 
 type AudioMessage struct {
 	Timestamp uint32
-	Data      []byte
+	Length    uint32
+	Data      io.Reader
 }
 
 func (m *AudioMessage) FromPacket(pack *Packet) {
 	m.Timestamp = pack.Timestamp
+	m.Length = pack.Length
 	m.Data = pack.Data
 }

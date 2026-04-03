@@ -61,6 +61,10 @@ func (h *CommandHeader) Label() uint8 {
 	return h.label
 }
 
+func (h *CommandHeader) LabelString() string {
+	return cmdToName[h.label]
+}
+
 func (h *CommandHeader) Trx() uint32 {
 	return h.trx
 }

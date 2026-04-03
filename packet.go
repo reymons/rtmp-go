@@ -1,5 +1,7 @@
 package rtmp
 
+import "io"
+
 const (
 	PackSetChunkSize  uint8 = 1
 	PackAbort               = 2
@@ -15,29 +17,17 @@ const (
 	PackAggregate           = 22
 )
 
-type Channel struct {
-	ID             uint32
-	Timestamp      uint32
-	TimestampDelta uint32
-	RecvBytes      uint32
-	PackStream     uint32
-	PackLength     uint32
-	PackType       uint8
-	RecvBuf        []byte
-}
-
-type SendChannel struct {
-	ID         uint32
-	Timestamp  uint32
-	PackStream uint32
-	PackLength uint32
-	PackType   uint8
-}
-
 type Packet struct {
 	Channel   uint32
 	Stream    uint32
 	Type      uint8
 	Timestamp uint32
-	Data      []byte
+	Length    uint32
+	DataRaw   []byte
+	Data      io.Reader
+}
+
+func (pack *Packet) discard() error {
+	_, err := io.Copy(io.Discard, pack.Data)
+	return err
 }
