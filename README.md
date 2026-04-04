@@ -21,6 +21,7 @@ package main
 
 import (
 	"log"
+	"io"
 
 	"github.com/reymons/rtmp-go"
 )
@@ -52,17 +53,28 @@ func onConn(conn *rtmp.Conn) {
 			if err == rtmp.ErrUnsupportedMessage {
 				continue
 			}
-			log.Printf("ERROR: read stream message: %v", err)
+			if err == rtmp.ErrConnClosed {
+				log.Printf("INFO: connection closed: %s", conn.RemoteAddr())
+			} else {
+				log.Printf("ERROR: read stream message: %v", err)
+			}
 			return
 		}
 
 		switch m := mesg.(type) {
 		case *rtmp.VideoMessage:
 			log.Printf("INFO: video message: timestamp %d", m.Timestamp)
+			_, err = io.Copy(io.Discard, m.Data)
 		case *rtmp.AudioMessage:
 			log.Printf("INFO: audio message: timestamp %d", m.Timestamp)
+			_, err = io.Copy(io.Discard, m.Data)
 		case *rtmp.CloseStreamMessage:
 			log.Printf("INFO: stream %d was closed", stream)
+			return
+		}
+
+		if err != nil {
+			log.Printf("ERROR: handle message: %v", err)
 			return
 		}
 	}
