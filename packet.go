@@ -26,8 +26,3 @@ type Packet struct {
 	DataRaw   []byte
 	Data      io.Reader
 }
-
-func (pack *Packet) discard() error {
-	_, err := io.Copy(io.Discard, pack.Data)
-	return err
-}

@@ -311,9 +311,10 @@ func TestChunk_DecodesHeader(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			buf := make([]byte, maxChunkHdrSize)
 			chunk := &rtmpChunk{}
 
-			if err := chunk.decode(bytes.NewReader(tt.hdr)); err != nil {
+			if err := chunk.decode(bytes.NewReader(tt.hdr), buf); err != nil {
 				t.Fatal(err)
 			}
 

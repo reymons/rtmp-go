@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"reflect"
-	"time"
 	"unsafe"
 
 	"github.com/reymons/amf-go"
@@ -51,7 +50,6 @@ var mesgBufSize = getMaxMesgSize(
 const defaultChunkSize uint32 = 128
 const defaultWinSize = 25000000
 const maxChannels = 10
-const readDeadline = time.Second * 15
 const maxChunkSize = 128 * 1024
 const maxNonMediaPackLen = 4096
 const ctrlChannel = 2
@@ -68,6 +66,7 @@ type Conn struct {
 	sendChannels   map[uint32]*sendChunkChannel
 	sendBuf        []byte
 	mesgBuf        []uintptr // use uintptr for alignment
+	tmpBuf         []byte    // for decoding chunks, packet data
 	sendWinSize    uint32
 	recvWinSize    uint32
 	totalRecvBytes uint32
@@ -83,10 +82,6 @@ type connReader struct {
 }
 
 func (r *connReader) Read(data []byte) (int, error) {
-	if err := r.conn.org.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
-		return 0, err
-	}
-
 	n, err := r.reader.Read(data)
 	r.conn.totalRecvBytes += uint32(n)
 
@@ -108,6 +103,7 @@ func newConn(org net.Conn) *Conn {
 		channels:      make(map[uint32]*chunkChannel),
 		sendChannels:  make(map[uint32]*sendChunkChannel),
 		mesgBuf:       make([]uintptr, mesgBufSize),
+		tmpBuf:        make([]byte, maxChunkHdrSize),
 		sendWinSize:   defaultWinSize,
 		recvWinSize:   defaultWinSize,
 		nextStream:    1,
@@ -181,7 +177,7 @@ func (conn *Conn) SetChunkSize(size uint32) error {
 }
 
 func (conn *Conn) onSetChunkSize(pack *Packet) error {
-	data := make([]byte, 4)
+	data := conn.tmpBuf[:4]
 	if _, err := io.ReadFull(pack.Data, data); err != nil {
 		return err
 	}
@@ -203,7 +199,7 @@ func (conn *Conn) AbortMessage(csid uint32) error {
 }
 
 func (conn *Conn) onAbort(pack *Packet) error {
-	data := make([]byte, 4)
+	data := conn.tmpBuf[:4]
 	if _, err := io.ReadFull(pack.Data, data); err != nil {
 		return err
 	}
@@ -226,11 +222,11 @@ func (conn *Conn) SetWinAckSize(size uint32) error {
 }
 
 func (conn *Conn) onWinAckSize(pack *Packet) error {
-	data := make([]byte, 4)
+	data := conn.tmpBuf[:4]
 	if _, err := io.ReadFull(pack.Data, data); err != nil {
 		return err
 	}
-	conn.recvWinSize = binary.BigEndian.Uint32(pack.DataRaw)
+	conn.recvWinSize = binary.BigEndian.Uint32(data)
 	Debugf("New receive win ack size: %d\n", conn.recvWinSize)
 	return nil
 }
@@ -243,7 +239,7 @@ const (
 )
 
 func (conn *Conn) SetBandwidth(size uint32, typ uint8) error {
-	data := make([]byte, 5)
+	data := conn.tmpBuf[:5]
 	binary.BigEndian.PutUint32(data, size)
 	data[4] = typ
 	if err := conn.sendControlPack(PackSetBandwidth, data); err != nil {
@@ -255,7 +251,7 @@ func (conn *Conn) SetBandwidth(size uint32, typ uint8) error {
 }
 
 func (conn *Conn) onSetBandwidth(pack *Packet) error {
-	data := make([]byte, 5)
+	data := conn.tmpBuf[:5]
 	if _, err := io.ReadFull(pack.Data, data); err != nil {
 		return err
 	}
@@ -285,7 +281,7 @@ func (conn *Conn) onSetBandwidth(pack *Packet) error {
 }
 
 func (conn *Conn) onAck(pack *Packet) error {
-	data := make([]byte, 4)
+	data := conn.tmpBuf[:4]
 	if _, err := io.ReadFull(pack.Data, data); err != nil {
 		return err
 	}
@@ -331,7 +327,7 @@ func (conn *Conn) getOrCreateChannel(id uint32) (*chunkChannel, error) {
 // Returns a channel that handled the read chunk
 func (conn *Conn) readChunk() (*chunkChannel, error) {
 	var chunk rtmpChunk
-	if err := chunk.decode(conn.reader); err != nil {
+	if err := chunk.decode(conn.reader, conn.tmpBuf); err != nil {
 		return nil, fmt.Errorf("decode chunk: %w", err)
 	}
 	Debugf("NEW CHUNK: %+v", chunk)
@@ -466,14 +462,24 @@ func (conn *Conn) packetToBasicMesg(pack *Packet) (BasicMessage, error) {
 
 	switch pack.Type {
 	case PackVideo:
-		mesg = (*VideoMessage)(buf)
+		m := (*VideoMessage)(buf)
+		m.Timestamp = pack.Timestamp
+		m.Length = pack.Length
+		m.Data = pack.Data
+		mesg = m
 	case PackAudio:
-		mesg = (*AudioMessage)(buf)
+		m := (*AudioMessage)(buf)
+		m.Timestamp = pack.Timestamp
+		m.Length = pack.Length
+		m.Data = pack.Data
+		mesg = m
 	default:
 		return nil, ErrUnsupportedMessage
 	}
 
-	mesg.FromPacket(pack)
+	// Do not come up with something like this since it's gonna move the packet to the heap
+	// mesg.FromPacket(pack, r)
+
 	return mesg, nil
 }
 
@@ -510,7 +516,7 @@ func (conn *Conn) ReadMessage() (Message, uint32, error) {
 	}
 
 	if err == ErrUnsupportedMessage {
-		if err := pack.discard(); err != nil {
+		if err := discard(pack.Data); err != nil {
 			return nil, 0, fmt.Errorf("discard packet data: %w", err)
 		}
 	}
@@ -641,43 +647,6 @@ func (conn *Conn) SendCommandMessageReply(reply CommandMessageReply, label uint8
 	return conn.SendCommandMessage(reply, trx, stream, channel)
 }
 
-func (conn *Conn) ReadCommandMessageReply(reply CommandMessageReply, trx uint32) error {
-	for {
-		var pack Packet
-		if err := conn.ReadPacket(&pack); err != nil {
-			return fmt.Errorf("read packet: %w", err)
-		}
-
-		if pack.Type != PackCmdAMF0 {
-			if err := pack.discard(); err != nil {
-				return fmt.Errorf("drain packet data: %w", err)
-			}
-			continue
-		}
-
-		conn.dec.SetData(pack.DataRaw)
-		hdr := CommandHeader{}
-		if err := hdr.Decode(conn.dec); err != nil {
-			return fmt.Errorf("decode command header: %w", err)
-		}
-
-		if hdr.Trx() != trx {
-			// TODO: if other transaction comes in, do something
-			continue
-		}
-
-		switch hdr.Label() {
-		case CmdResult, CmdError, CmdInform:
-			conn.dec.SetData(pack.DataRaw)
-			if err := reply.Decode(conn.dec); err != nil {
-				return fmt.Errorf("decode reply: %w", err)
-			}
-		default:
-			// TODO: handle default case
-		}
-	}
-}
-
 func (conn *Conn) SendCommandError(trx, stream, channel uint32) error {
 	hdr := CommandHeader{
 		label: CmdError,
@@ -687,13 +656,12 @@ func (conn *Conn) SendCommandError(trx, stream, channel uint32) error {
 	if err := hdr.Encode(conn.enc); err != nil {
 		return err
 	}
-	pack := Packet{
+	return conn.SendPacket(&Packet{
 		Channel: channel,
 		Stream:  stream,
 		Type:    PackCmdAMF0,
 		DataRaw: conn.enc.Data(),
-	}
-	return conn.SendPacket(&pack)
+	})
 }
 
 func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
@@ -704,7 +672,7 @@ func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
 		}
 
 		if pack.Type != PackCmdAMF0 {
-			if err := pack.discard(); err != nil {
+			if err := discard(pack.Data); err != nil {
 				return nil, fmt.Errorf("drain packet data: %w", err)
 			}
 			continue
@@ -713,7 +681,7 @@ func (conn *Conn) ReadCommandMessage(label uint8) (CommandMessage, error) {
 		mesg, err := conn.packetToCmdMesg(&pack)
 		if err != nil {
 			if err == ErrUnsupportedMessage {
-				if err := pack.discard(); err != nil {
+				if err := discard(pack.Data); err != nil {
 					return nil, fmt.Errorf("drain packet data: %w", err)
 				}
 				continue

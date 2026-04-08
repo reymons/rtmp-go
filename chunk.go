@@ -23,8 +23,6 @@ var (
 	ErrInvalidChunkChannel = errors.New("invalid chunk channel")
 )
 
-var chunkTmpBuf = [maxChunkHdrSize]byte{}
-
 type rtmpChunk struct {
 	chunkType  uint8
 	channel    uint32
@@ -32,14 +30,15 @@ type rtmpChunk struct {
 	packType   uint8
 	packStream uint32
 	packLength uint32
-	// Used for decoding as a temporary buffer
-	buf [maxChunkHdrSize]byte
 }
 
-func (c *rtmpChunk) decode(r io.Reader) error {
+func (c *rtmpChunk) decode(r io.Reader, buf []byte) error {
+	if len(buf) < maxChunkHdrSize {
+		return io.ErrShortBuffer
+	}
+
 	var chunkType, packType uint8
 	var channel, timestamp, packStream, packLength uint32
-	var buf = c.buf[:]
 
 	if _, err := io.ReadFull(r, buf[:1]); err != nil {
 		return err

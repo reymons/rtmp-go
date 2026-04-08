@@ -1,5 +1,7 @@
 package rtmp
 
+import "io"
+
 func reverseMap[K comparable, V comparable](m map[K]V) map[V]K {
 	result := make(map[V]K)
 	for k, v := range m {
@@ -26,4 +28,11 @@ func decode3BytesBE(b []byte) uint32 {
 	return uint32(b[0])<<16 |
 		uint32(b[1])<<8 |
 		uint32(b[2])
+}
+
+var discardBuf = make([]byte, 8192)
+
+func discard(r io.Reader) error {
+	_, err := io.CopyBuffer(io.Discard, r, discardBuf)
+	return err
 }
