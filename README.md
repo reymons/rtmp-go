@@ -1,3 +1,6 @@
+[![Go Reference](https://camo.githubusercontent.com/6c4af731f6980aec244905243d4d159be8b268802b1c55879025c82985b68e26/68747470733a2f2f706b672e676f2e6465762f62616467652f6769746875622e636f6d2f756e74616e676c6564636f2f73747265616d696e67)](https://pkg.go.dev/github.com/reymons/rtmp-go)
+[![0 dependencies!](https://0dependencies.dev/0dependencies.svg)](https://0dependencies.dev)
+
 # RTMP GO
 RTMP implementation in Go
 
